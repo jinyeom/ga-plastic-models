@@ -1,237 +1,131 @@
-import sys
+from multiprocessing import Pool
 import random
 import numpy as np
-import pickle
 import torch
-import time
-import math
-import os
-from os.path import join, exists
-import multiprocessing
-from multiprocessing import set_start_method
-import gc
-import copy
+from utils import Arguments, Experiment
+from train import Individual
 
-from train import GAIndividual
+args = Arguments(
+    seed=0,
+    artifact_path="./artifacts",
+    env_id="CarRacing-v0",
+    obs_size=64,
+    latent_size=128,
+    hidden_size=256,
+    action_size=3,
+    discrete_vae=True,
+    mut_mode="MUT-MOD",
+    mut_pow=0.01,
+    num_generations=1200,
+    pop_size=200,
+    num_workers=10,
+    time_limit=1000,
+    num_evals=1,
+    early_termination=True,
+    num_topk=3,
+    num_evals_elite=20,
+    trunc_thresh=100,
+    sample_size=2,
+)
 
+experiment = Experiment(args)
 
-set_start_method("forkserver", force=True)
+random.seed(args.seed)
+np.random.seed(seed=args.seed)
+torch.manual_seed(args.seed)
 
+population = [
+    Individual(
+        args.obs_size,
+        args.latent_size,
+        args.hidden_size,
+        args.action_size,
+        args.discrete_vae,
+        args.mut_mode,
+        args.mut_pow,
+    )
+    for _ in range(args.pop_size)
+]
 
-class GA:
-    def __init__(
-        self, elite_evals, top, threads, timelimit, pop_size, setting, discrete_VAE
-    ):
-        self.elite_evals = elite_evals  # number of evaluations for elites
-        self.top = top  # number of top individuals that should be reevaluated
-        self.threads = threads
-        self.pop_size = pop_size
-        self.truncation_threshold = pop_size // 2
+for gen in range(args.num_generations):
+    pool = Pool(args.num_workers)
 
-        # population
-        self.P = [
-            GAIndividual(
-                timelimit, setting, multi=threads > 1, discrete_VAE=discrete_VAE
-            )
-            for _ in range(pop_size)
-        ]
-
-    def run(self, max_generations, filename, folder):
-        Q = []
-
-        max_fitness = -sys.maxsize
-
-        fitness_file = open(folder + "/fitness_" + filename + ".txt", "a")
-
-        ind_fitness_file = open(
-            folder + "/individual_fitness_" + filename + ".txt", "a"
+    for ind in population:
+        ind.run_solution(
+            pool,
+            time_limit=args.time_limit,
+            num_evals=args.num_evals,
+            early_termination=args.early_termination,
+            force_eval=True,
         )
 
-        i = 0
-        P = self.P
+    fitnesses = []
+    for ind in population:
+        ind.is_elite = False
+        mean_fitness, _ = ind.evaluate_solution(args.num_evals)
+        fitnesses.append(mean_fitness)
 
-        pop_name = folder + "/pop_" + filename + ".p"
+    population = sorted(population, key=lambda ind: ind.fitness, reverse=True)
 
-        # Load previously saved population
-        if os.path.exists(pop_name):
-            pop_tmp = torch.load(pop_name)
+    # reevaluate top k individuals
 
-            print("Loading existing population ", pop_name, len(pop_tmp))
+    topk = population[: args.num_topk]
 
-            idx = 0
-            for s in pop_tmp:
-                P[idx].r_gen.vae.load_state_dict(s["vae"].copy())
-                P[idx].r_gen.controller.load_state_dict(s["controller"].copy())
-                P[idx].r_gen.mdrnn.load_state_dict(s["mdrnn"].copy())
+    for ind in topk:
+        ind.run_solution(
+            pool,
+            time_limit=args.time_limit,
+            num_evals=args.num_evals_elite,
+            early_termination=args.early_termination,
+            force_eval=False,
+        )
 
-                i = s["generation"] + 1
-                idx += 1
+    topk_fitnesses = []
+    for ind in topk:
+        mean_fitness, _ = ind.evaluate_solution(args.num_evals_elite)
+        topk_fitnesses.append(mean_fitness)
 
-        while True:
-            pool = multiprocessing.Pool(self.threads)
+    topk = sorted(topk, key=lambda ind: ind.fitness, reverse=True)
 
-            start_time = time.time()
+    elite = topk[0]
+    elite.is_elite = True
+    experiment.update_best(elite, elite.fitness)
 
-            print("Generation ", i)
-            sys.stdout.flush()
+    pool.close()  # evaluation done!
 
-            print("Evaluating individuals: ", len(P))
-            for s in P:
-                s.run_solution(pool, 1, force_eval=True)
+    # log generation statistics
 
-            fitness = []
+    experiment.log(
+        gen,
+        fit_mean=np.mean(fitnesses),
+        fit_std=np.std(fitnesses),
+        topk_fit_mean=np.mean(topk_fitnesses),
+        topk_fit_std=np.std(topk_fitnesses),
+        elite_fit=elite.fitness,
+    )
 
-            for s in P:
-                s.is_elite = False
-                f, _ = s.evaluate_solution(1)
-                fitness += [f]
+    # reproduce
 
-            self.sort_objective(P)
+    if len(population) > args.trunc_thresh - 1:
+        del population[args.trunc_thresh - 1 :]
+    population.append(elite)
 
-            max_fitness_gen = (
-                -sys.maxsize
-            )  # keep track of highest fitness this generation
+    offsprings = []
 
-            print("Evaluating elites: ", self.top)
+    while len(offsprings) < args.trunc_thresh:
+        samples = random.sample(population, args.sample_size)
+        samples = sorted(samples, key=lambda ind: ind.fitness, reverse=True)
+        selected = samples[0]
 
-            for k in range(self.top):
-                P[k].run_solution(pool, self.elite_evals)
-
-            for k in range(self.top):
-
-                f, _ = P[k].evaluate_solution(self.elite_evals)
-
-                if f > max_fitness_gen:
-                    max_fitness_gen = f
-                    elite = P[k]
-
-                if f > max_fitness:  # best fitness ever found
-                    max_fitness = f
-                    print("\tFound new champion ", max_fitness)
-
-                    best_ever = P[k]
-                    sys.stdout.flush()
-
-                    torch.save(
-                        {
-                            "vae": elite.r_gen.vae.state_dict(),
-                            "controller": elite.r_gen.controller.state_dict(),
-                            "mdrnn": elite.r_gen.mdrnn.state_dict(),
-                            "fitness": f,
-                        },
-                        "{0}/best_{1}G{2}.p".format(folder, filename, i),
-                    )
-
-            elite.is_elite = True  # The best
-
-            sys.stdout.flush()
-
-            pool.close()
-
-            Q = []
-
-            if len(P) > self.truncation_threshold - 1:
-                del P[self.truncation_threshold - 1 :]
-
-            P.append(elite)  # Maybe it's in there twice now but that's okay
-
-            save_pop = []
-
-            for s in P:
-                ind_fitness_file.write("Gen\t%d\tFitness\t%f\n" % (i, -s.fitness))
-                ind_fitness_file.flush()
-
-                save_pop += [
-                    {
-                        "vae": s.r_gen.vae.state_dict(),
-                        "controller": s.r_gen.controller.state_dict(),
-                        "mdrnn": s.r_gen.mdrnn.state_dict(),
-                        "fitness": fitness,
-                        "generation": i,
-                    }
-                ]
-
-            if i % 25 == 0:
-                print("saving population")
-                torch.save(save_pop, folder + "/pop_" + filename + ".p")
-                print("done")
-
-            print("Creating new population ...", len(P))
-            Q = self.make_new_pop(P)
-
-            P.extend(Q)
-
-            elapsed_time = time.time() - start_time
-
-            print(
-                "%d\tAverage\t%f\tMax\t%f\tMax ever\t%f\tTime\t%f\n"
-                % (i, np.mean(fitness), max_fitness_gen, max_fitness, elapsed_time)
-            )  # python will convert \n to os.linesep
-
-            fitness_file.write(
-                "%d\tAverage\t%f\tMax\t%f\tMax ever\t%f\tTime\t%f\n"
-                % (i, np.mean(fitness), max_fitness_gen, max_fitness, elapsed_time)
-            )  # python will convert \n to os.linesep
-            fitness_file.flush()
-
-            if i > max_generations:
+        # an elite with the highest fitness wins
+        for ind in samples:
+            if ind.is_elite:
+                selected = ind
                 break
 
-            gc.collect()
+        child = selected.clone()
+        child.mutate()
 
-            i += 1
+        offsprings.append(child)
 
-        print("Testing best ever: ")
-        pool = multiprocessing.Pool(self.threads)
-
-        best_ever.run_solution(pool, 100, early_termination=False, force_eval=True)
-        avg_f, sd = best_ever.evaluate_solution(100)
-        print(avg_f, sd)
-
-        fitness_file.write("Test\t%f\t%f\n" % (avg_f, sd))
-
-        fitness_file.close()
-
-        ind_fitness_file.close()
-
-    def sort_objective(self, P):
-        for i in range(len(P) - 1, -1, -1):
-            for j in range(1, i + 1):
-                s1 = P[j - 1]
-                s2 = P[j]
-
-                if s1.fitness > s2.fitness:
-                    P[j - 1] = s2
-                    P[j] = s1
-
-    def make_new_pop(self, P):
-        """
-        Make new population Q, offspring of P. 
-        """
-        Q = []
-
-        while len(Q) < self.truncation_threshold:
-            selected_solution = None
-
-            s1 = random.choice(P)
-            s2 = s1
-            while s1 == s2:
-                s2 = random.choice(P)
-
-            if s1.fitness < s2.fitness:  # Lower is better
-                selected_solution = s1
-            else:
-                selected_solution = s2
-
-            if s1.is_elite:  # If they are the elite they definitely win
-                selected_solution = s1
-            elif s2.is_elite:
-                selected_solution = s2
-
-            child_solution = selected_solution.clone_individual()
-            child_solution.mutate()
-
-            if not child_solution in Q:
-                Q.append(child_solution)
-
-        return Q
+    population.extend(offsprings)
