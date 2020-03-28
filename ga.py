@@ -1,3 +1,5 @@
+# xvfb-run -a -s "-screen 0 1400x900x24 +extension RANDR" -- python ga.py
+
 from multiprocessing import Pool
 import random
 import numpy as np
@@ -16,12 +18,11 @@ args = Arguments(
     discrete_vae=True,
     mut_mode="MUT-MOD",
     mut_pow=0.01,
-    num_generations=1200,
+    num_generations=5,
     pop_size=200,
-    num_workers=10,
+    num_workers=16,
     time_limit=1000,
     num_evals=1,
-    early_termination=True,
     num_topk=3,
     num_evals_elite=20,
     trunc_thresh=100,
@@ -34,36 +35,43 @@ random.seed(args.seed)
 np.random.seed(seed=args.seed)
 torch.manual_seed(args.seed)
 
+torch.set_num_threads(1)
+
+# disable OpenAI Gym logger
+gym.logger.set_level(40)
+
 population = [
     Individual(
-        args.obs_size,
-        args.latent_size,
-        args.hidden_size,
-        args.action_size,
-        args.discrete_vae,
         args.mut_mode,
         args.mut_pow,
+        obs_size=args.obs_size,
+        latent_size=args.latent_size,
+        hidden_size=args.hidden_size,
+        action_size=args.action_size,
+        discrete_vae=args.discrete_vae,
     )
     for _ in range(args.pop_size)
 ]
 
 for gen in range(args.num_generations):
-    pool = Pool(args.num_workers)
 
-    for ind in population:
-        ind.run_solution(
-            pool,
-            time_limit=args.time_limit,
-            num_evals=args.num_evals,
-            early_termination=args.early_termination,
-            force_eval=True,
-        )
+    # evaluate the population
 
     fitnesses = []
-    for ind in population:
-        ind.is_elite = False
-        mean_fitness, _ = ind.evaluate_solution(args.num_evals)
-        fitnesses.append(mean_fitness)
+
+    with Pool(args.num_workers) as pool:
+        for ind in population:
+            ind.run_solution(
+                pool,
+                time_limit=args.time_limit,
+                num_evals=args.num_evals,
+                force_eval=True,
+            )
+
+        for ind in population:
+            ind.is_elite = False
+            mean_fitness, _ = ind.evaluate_solution(args.num_evals)
+            fitnesses.append(mean_fitness)
 
     population = sorted(population, key=lambda ind: ind.fitness, reverse=True)
 
@@ -71,27 +79,26 @@ for gen in range(args.num_generations):
 
     topk = population[: args.num_topk]
 
-    for ind in topk:
-        ind.run_solution(
-            pool,
-            time_limit=args.time_limit,
-            num_evals=args.num_evals_elite,
-            early_termination=args.early_termination,
-            force_eval=False,
-        )
-
     topk_fitnesses = []
-    for ind in topk:
-        mean_fitness, _ = ind.evaluate_solution(args.num_evals_elite)
-        topk_fitnesses.append(mean_fitness)
+
+    with Pool(args.num_workers) as pool:
+        for ind in topk:
+            ind.run_solution(
+                pool,
+                time_limit=args.time_limit,
+                num_evals=args.num_evals_elite,
+                force_eval=False,
+            )
+
+        for ind in topk:
+            mean_fitness, _ = ind.evaluate_solution(args.num_evals_elite)
+            topk_fitnesses.append(mean_fitness)
 
     topk = sorted(topk, key=lambda ind: ind.fitness, reverse=True)
 
     elite = topk[0]
     elite.is_elite = True
     experiment.update_best(elite, elite.fitness)
-
-    pool.close()  # evaluation done!
 
     # log generation statistics
 

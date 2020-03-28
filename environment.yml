@@ -1,0 +1,17 @@
+name: ga-plastic-models
+channels:
+  - conda-forge
+  - pytorch
+dependencies:
+  - python>=3.7
+  - pip
+  - pytorch
+  - cudatoolkit=10.1
+  - torchvision
+  - matplotlib
+  - jupyter
+  - tqdm
+  - fire
+  - tensorboard
+  - tabulate
+  - gym[box2d]

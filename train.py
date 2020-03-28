@@ -86,31 +86,12 @@ class Agent:
 
 
 class Individual:
-    def __init__(
-        self,
-        obs_size,
-        latent_size,
-        hidden_size,
-        action_size,
-        discrete_vae,
-        mut_mode,
-        mut_pow,
-    ):
-        self.obs_size = obs_size
-        self.latent_size = latent_size
-        self.hidden_size = hidden_size
-        self.action_size = action_size
-        self.discrete_vae = discrete_vae
+    def __init__(self, mut_mode, mut_pow, **agent_kwargs):
         self.mut_mode = mut_mode
         self.mut_pow = mut_pow
+        self.agent_kwargs = agent_kwargs
 
-        self.agent = Agent(
-            self.obs_size,
-            self.latent_size,
-            self.hidden_size,
-            self.action_size,
-            self.discrete_vae,
-        )
+        self.agent = Agent(**agent_kwargs)
 
         self.async_results = []
         self.calculated_results = {}
@@ -128,12 +109,7 @@ class Individual:
         return s
 
     def run_solution(
-        self,
-        pool,
-        time_limit=1000,
-        num_evals=5,
-        early_termination=True,
-        force_eval=False,
+        self, pool, time_limit=1000, num_evals=5, force_eval=False,
     ):
         if force_eval:
             # remove existing results, so that it can be evaluated again
@@ -141,15 +117,16 @@ class Individual:
 
         if num_evals not in self.calculated_results:
             self.async_results = []
-            for i in range(num_evals):
-                results = pool.apply_async(
-                    self.agent.rollout, args=(time_limit, False, early_termination)
-                )
+            for _ in range(num_evals):
+                f = self.agent.rollout
+                args = (time_limit, False, True)
+                results = pool.apply_async(f, args=args)
                 self.async_results.append(results)
 
     def evaluate_solution(self, num_evals):
         if num_evals in self.calculated_results:
             mean_fitness, std_fitness = self.calculated_results[num_evals]
+
         else:
             results = [t.get() for t in self.async_results]
             mean_fitness = np.mean(results)
@@ -174,15 +151,7 @@ class Individual:
         }
 
     def clone(self):
-        child = Individual(
-            self.obs_size,
-            self.latent_size,
-            self.hidden_size,
-            self.action_size,
-            self.discrete_vae,
-            self.mut_mode,
-            self.mut_pow,
-        )
+        child = Individual(self.mut_mode, self.mut_pow, **self.agent_kwargs)
 
         child.agent.vae = copy.deepcopy(self.agent.vae)
         child.agent.mdnrnn = copy.deepcopy(self.agent.mdnrnn)
@@ -201,6 +170,7 @@ class Individual:
             self.mutate_params(self.agent.controller.state_dict())
             self.mutate_params(self.agent.vae.state_dict())
             self.mutate_params(self.agent.mdnrnn.state_dict())
+
         elif self.mut_mode == "MUT-MOD":
             c = np.random.randint(3)
             if c == 0:
@@ -209,5 +179,6 @@ class Individual:
                 self.mutate_params(self.agent.mdnrnn.state_dict())
             else:
                 self.mutate_params(self.agent.controller.state_dict())
+
         else:
             raise NotImplementedError
