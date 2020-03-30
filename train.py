@@ -71,9 +71,8 @@ class Agent:
             action = action.squeeze().cpu().numpy()
 
             obs, reward, done, _ = env.step(action)
-
             fitness += reward
-            neg_count += int(reward < 0)
+            neg_count = neg_count + 1 if reward < 0 else 0  # only consecutive
 
             # early termination for speeding up evaluation
             if early_termination and (neg_count > 20 or t > time_limit):

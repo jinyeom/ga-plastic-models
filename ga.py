@@ -1,138 +1,103 @@
-# xvfb-run -a -s "-screen 0 1400x900x24 +extension RANDR" -- python ga.py
-
 from multiprocessing import Pool
 import random
 import numpy as np
-import torch
-from utils import Arguments, Experiment
 from train import Individual
 
-args = Arguments(
-    seed=0,
-    artifact_path="./artifacts",
-    env_id="CarRacing-v0",
-    obs_size=64,
-    latent_size=128,
-    hidden_size=256,
-    action_size=3,
-    discrete_vae=True,
-    mut_mode="MUT-MOD",
-    mut_pow=0.01,
-    num_generations=5,
-    pop_size=200,
-    num_workers=16,
-    time_limit=1000,
-    num_evals=1,
-    num_topk=3,
-    num_evals_elite=20,
-    trunc_thresh=100,
-    sample_size=2,
-)
 
-experiment = Experiment(args)
+def ga_run(args, experiment):
+    population = [
+        Individual(
+            args.mut_mode,
+            args.mut_pow,
+            obs_size=args.obs_size,
+            latent_size=args.latent_size,
+            hidden_size=args.hidden_size,
+            action_size=args.action_size,
+            discrete_vae=args.discrete_vae,
+        )
+        for _ in range(args.pop_size)
+    ]
 
-random.seed(args.seed)
-np.random.seed(seed=args.seed)
-torch.manual_seed(args.seed)
+    for gen in range(args.num_generations):
 
-torch.set_num_threads(1)
+        # evaluate the population
 
-# disable OpenAI Gym logger
-gym.logger.set_level(40)
+        fitnesses = []
 
-population = [
-    Individual(
-        args.mut_mode,
-        args.mut_pow,
-        obs_size=args.obs_size,
-        latent_size=args.latent_size,
-        hidden_size=args.hidden_size,
-        action_size=args.action_size,
-        discrete_vae=args.discrete_vae,
-    )
-    for _ in range(args.pop_size)
-]
+        with Pool(args.num_workers) as pool:
+            for ind in population:
+                ind.run_solution(
+                    pool,
+                    time_limit=args.time_limit,
+                    num_evals=args.num_evals,
+                    force_eval=True,
+                )
 
-for gen in range(args.num_generations):
+            for ind in population:
+                ind.is_elite = False
+                mean_fitness, _ = ind.evaluate_solution(args.num_evals)
+                fitnesses.append(mean_fitness)
 
-    # evaluate the population
+        population = sorted(population, key=lambda ind: ind.fitness, reverse=True)
 
-    fitnesses = []
+        # reevaluate top k individuals
 
-    with Pool(args.num_workers) as pool:
-        for ind in population:
-            ind.run_solution(
-                pool,
-                time_limit=args.time_limit,
-                num_evals=args.num_evals,
-                force_eval=True,
-            )
+        topk = population[: args.num_topk]
 
-        for ind in population:
-            ind.is_elite = False
-            mean_fitness, _ = ind.evaluate_solution(args.num_evals)
-            fitnesses.append(mean_fitness)
+        topk_fitnesses = []
 
-    population = sorted(population, key=lambda ind: ind.fitness, reverse=True)
+        with Pool(args.num_workers) as pool:
+            for ind in topk:
+                ind.run_solution(
+                    pool,
+                    time_limit=args.time_limit,
+                    num_evals=args.num_evals_elite,
+                    force_eval=False,
+                )
 
-    # reevaluate top k individuals
+            for ind in topk:
+                mean_fitness, _ = ind.evaluate_solution(args.num_evals_elite)
+                topk_fitnesses.append(mean_fitness)
 
-    topk = population[: args.num_topk]
+        topk = sorted(topk, key=lambda ind: ind.fitness, reverse=True)
 
-    topk_fitnesses = []
+        elite = topk[0]
+        elite.is_elite = True
+        experiment.update_best(elite, elite.fitness)
 
-    with Pool(args.num_workers) as pool:
-        for ind in topk:
-            ind.run_solution(
-                pool,
-                time_limit=args.time_limit,
-                num_evals=args.num_evals_elite,
-                force_eval=False,
-            )
+        # log generation statistics
 
-        for ind in topk:
-            mean_fitness, _ = ind.evaluate_solution(args.num_evals_elite)
-            topk_fitnesses.append(mean_fitness)
+        experiment.log(
+            gen,
+            fit_mean=np.mean(fitnesses),
+            fit_std=np.std(fitnesses),
+            topk_fit_mean=np.mean(topk_fitnesses),
+            topk_fit_std=np.std(topk_fitnesses),
+            elite_fit=elite.fitness,
+        )
 
-    topk = sorted(topk, key=lambda ind: ind.fitness, reverse=True)
+        # reproduce
 
-    elite = topk[0]
-    elite.is_elite = True
-    experiment.update_best(elite, elite.fitness)
+        if len(population) > args.trunc_thresh - 1:
+            del population[args.trunc_thresh - 1 :]
+        population.append(elite)
 
-    # log generation statistics
+        offsprings = []
 
-    experiment.log(
-        gen,
-        fit_mean=np.mean(fitnesses),
-        fit_std=np.std(fitnesses),
-        topk_fit_mean=np.mean(topk_fitnesses),
-        topk_fit_std=np.std(topk_fitnesses),
-        elite_fit=elite.fitness,
-    )
+        while len(offsprings) < args.trunc_thresh:
+            samples = random.sample(population, args.sample_size)
+            samples = sorted(samples, key=lambda ind: ind.fitness, reverse=True)
+            selected = samples[0]  # select one with the highest fitness
 
-    # reproduce
+            # an elite with the highest fitness wins
+            for ind in samples:
+                if ind.is_elite:
+                    selected = ind
+                    break
 
-    if len(population) > args.trunc_thresh - 1:
-        del population[args.trunc_thresh - 1 :]
-    population.append(elite)
+            child = selected.clone()
+            child.mutate()
 
-    offsprings = []
+            offsprings.append(child)
 
-    while len(offsprings) < args.trunc_thresh:
-        samples = random.sample(population, args.sample_size)
-        samples = sorted(samples, key=lambda ind: ind.fitness, reverse=True)
-        selected = samples[0]
-
-        # an elite with the highest fitness wins
-        for ind in samples:
-            if ind.is_elite:
-                selected = ind
-                break
-
-        child = selected.clone()
-        child.mutate()
-
-        offsprings.append(child)
-
-    population.extend(offsprings)
+        population.extend(offsprings)

@@ -52,9 +52,11 @@ class Experiment:
 
         colored_exp_id = colored(self.exp_id, "green")
         print(f"Starting experiment: {colored_exp_id}")
+        print()
 
         table = [(k, v) for k, v in self.args.__dict__.items()]
         print(tabulate(table, tablefmt="fancy_grid", stralign="center", numalign="center"))
+        print()
 
         with open(self.exp_path / "config.json", "w") as f:
             f.write(json.dumps(self.args.__dict__, indent=4, sort_keys=True))
