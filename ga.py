@@ -7,6 +7,7 @@ from train import Individual
 def ga_run(args, experiment):
     population = [
         Individual(
+            args.plastic,
             args.mut_mode,
             args.mut_pow,
             obs_size=args.obs_size,
@@ -30,6 +31,7 @@ def ga_run(args, experiment):
                     pool,
                     time_limit=args.time_limit,
                     num_evals=args.num_evals,
+                    early_termination=True,
                     force_eval=True,
                 )
 
@@ -52,6 +54,7 @@ def ga_run(args, experiment):
                     pool,
                     time_limit=args.time_limit,
                     num_evals=args.num_evals_elite,
+                    early_termination=True,
                     force_eval=False,
                 )
 
@@ -67,7 +70,7 @@ def ga_run(args, experiment):
 
         # log generation statistics
 
-        experiment.log(
+        experiment.logkv(
             gen,
             fit_mean=np.mean(fitnesses),
             fit_std=np.std(fitnesses),

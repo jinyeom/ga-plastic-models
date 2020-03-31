@@ -47,7 +47,8 @@ class Experiment:
         # set up TensorBoard
         self.writer = SummaryWriter(self.exp_path)
 
-        # current best performance
+        # current best solution
+        self.final_model_path = None
         self.global_best_fitness = -math.inf
 
         colored_exp_id = colored(self.exp_id, "green")
@@ -61,13 +62,13 @@ class Experiment:
         with open(self.exp_path / "config.json", "w") as f:
             f.write(json.dumps(self.args.__dict__, indent=4, sort_keys=True))
 
-    def log(self, global_step, **kwargs):
-        kwargs["global_step"] = global_step
-        kwargs["global_best_fitness"] = self.global_best_fitness
+    def log(self, message):
+        self.logger.info(message)
 
+    def logkv(self, global_step, **kwargs):
         keys, values = tuple(zip(*kwargs.items()))
-        keys = list(keys)
-        values = list(values)
+        keys = ["global_step", "global_best_fitness"] + list(keys)
+        values = [global_step, self.global_best_fitness] + list(values)
 
         self.logger.info(
             tabulate(
@@ -80,6 +81,8 @@ class Experiment:
             )
         )
 
+        # TODO: change this to
+        # for k, v in zip(keys, values):
         for k, v in kwargs.items():
             self.writer.add_scalar(k, v, global_step=global_step)
 
@@ -96,6 +99,6 @@ class Experiment:
     def update_best(self, ind, fitness):
         if fitness > self.global_best_fitness:
             self.logger.info(f"Improvement detected: {self.global_best_fitness:.5f} --> {fitness:.5f}")
-            final_model_path = self.exp_path / f"model_final.pth"
-            torch.save(ind.state_dict(), final_model_path)
+            self.final_model_path = self.exp_path / f"model_final.pth"
+            torch.save(ind.state_dict(), self.final_model_path)
             self.global_best_fitness = fitness

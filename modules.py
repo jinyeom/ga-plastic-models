@@ -98,20 +98,23 @@ class MDNRNNCell(nn.Module):
 
 
 class NPRNNCell(nn.Module):
-    def __init__(self, input_size, hidden_size, clip=2.0):
+    def __init__(self, input_size, hidden_size, output_size, clip=2.0):
         super().__init__()
         self.input_size = input_size
         self.hidden_size = hidden_size
         self.clip = clip
 
-        self.fc = nn.Linear(input_size, hidden_size)
+        self.fc_in = nn.Linear(input_size, hidden_size)
 
         self.weight = nn.Parameter(torch.Tensor(hidden_size, hidden_size))
         self.alpha = nn.Parameter(torch.Tensor(hidden_size, hidden_size))
+
         self.norm = nn.LayerNorm(hidden_size)
 
         self.modulator = nn.Linear(hidden_size, 1)
         self.modfanout = nn.Linear(1, hidden_size)  # per-neuron
+
+        self.fc_out = nn.Linear(hidden_size, output_size)
 
         self.reset_parameters()
 
@@ -121,8 +124,9 @@ class NPRNNCell(nn.Module):
 
     def forward(self, x, h_pre, hebb):
         weight = self.weight + self.alpha * hebb
-        h_post = self.fc(x) + (h_pre.unsqueeze(1) @ weight).squeeze(1)
+        h_post = self.fc_in(x) + (h_pre.unsqueeze(1) @ weight).squeeze(1)
         h_post = torch.tanh(self.norm(h_post))
+        out = self.fc_out(h_post)
 
         # neuromodulated plasticity update
         m = torch.tanh(self.modulator(h_post))
@@ -130,7 +134,7 @@ class NPRNNCell(nn.Module):
         delta = eta * (h_pre.unsqueeze(2) @ h_post.unsqueeze(1))
         hebb = torch.clamp(hebb + delta, min=-self.clip, max=self.clip)
 
-        return h_post, m, hebb
+        return out, h_post, m, hebb
 
 
 class Controller(nn.Module):
